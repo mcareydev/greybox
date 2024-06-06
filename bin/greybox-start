@@ -1,0 +1,52 @@
+#!/opt/core/venv/bin/python3
+
+from pathlib import Path
+
+import grpc
+from core.api.grpc import client
+
+def main() -> int:
+
+    core = client.CoreGrpcClient()
+
+    # Check for existing session id  
+    session_id_path = Path("/run/greybox.sid")
+    if session_id_path.exists():
+        try:
+            existing_id = int(session_id_path.read_text()) 
+        except ValueError:
+            # Invalid value found, file will get overwritten below
+            existing_id = None
+
+        # If existing ID found, check if it's still valid
+        if existing_id:
+            try:
+                with core.context_connect():
+                    session_valid = core.check_session(existing_id)
+            except grpc.RpcError as e:
+                exit(f"grpc error: {e.details()}")
+
+            if session_valid:
+                # Print session ID and exit to avoid replacing valid session
+                # Exit with 0 to prevent restart loop
+                print(f"Service-started session already exists with ID {existing_id}")
+                exit(0)
+
+    # Open map xml file and start new session
+    try:
+        with core.context_connect():
+            result, session_id = core.open_xml(file_path=Path("/etc/greybox/map.xml"), start=True)
+    except grpc.RpcError as e:
+        exit(f"grpc error: {e.details()}")
+
+    if session_id:    
+        session_id_path.write_text(f"{session_id}\n")
+        print(f"Started session with ID {session_id}")
+        exit(0)
+    else:
+        # In case execution gets here
+        exit("Failed to start session, but no error returned, try running manually")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,36 @@
+#!/opt/core/venv/bin/python3
+
+from pathlib import Path
+
+import grpc
+from core.api.grpc import client
+
+
+def main() -> int:
+    """
+    Stop and delete service-started greybox session
+    """
+    # Check if session id file exists and get session id
+    session_id_path = Path("/run/greybox.sid")
+    if not session_id_path.exists():
+        print("Service-started session not found, no session stopped")
+        exit(0) 
+    
+    # Stop/delete session and delete session id file
+    core = client.CoreGrpcClient()
+    try:
+        session_id = int(session_id_path.read_text())
+        with core.context_connect():
+            core.stop_session(session_id)
+            print(f"Stopped session with ID {session_id}")
+            core.delete_session(session_id)
+            print(f"Deleted session with ID {session_id}")
+    except ValueError:
+        pass    
+    except grpc.RpcError as e:
+        print(f"grpc error: {e.details()}")
+    finally:
+        session_id_path.unlink()
+
+if __name__ == "__main__":
+    main()

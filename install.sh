@@ -9,12 +9,13 @@
 /bin/echo "UNITDIR      =${UNITDIR:=/usr/lib/systemd/system};"
 /bin/echo "SYSCONFDIR   =${SYSCONFDIR:=/etc};"
 /bin/echo "DATADIR      =${DATADIR:=/usr/share};"
+/bin/echo "BINDIR       =${BINDIR:=/usr/local/bin};"
 
 /usr/bin/install -d $BUILDROOT/$UNITDIR
 /usr/bin/install -m 0644 -t $BUILDROOT/$UNITDIR systemd/*
 
-/usr/bin/install -m 0644 -D share/maps/backbone.imn \
-                            $BUILDROOT/$SYSCONFDIR/$NAME/map.imn
+/usr/bin/install -m 0644 -D share/maps/custom/backbone_ext.xml \
+                            $BUILDROOT/$SYSCONFDIR/$NAME/map.xml
 
 /usr/bin/install -m 0644 -D etc/profile.d_greybox.sh \
                             $BUILDROOT/$SYSCONFDIR/profile.d/$NAME.sh
@@ -23,3 +24,5 @@ for i in clipart etc maps; do
   /usr/bin/install -d $BUILDROOT/$DATADIR/$NAME/$i
   /usr/bin/install -m 0644 -t $BUILDROOT/$DATADIR/$NAME/$i share/$i/*
 done
+
+/usr/bin/install -m 0755 -t $BULDROOT/$BINDIR bin/*
