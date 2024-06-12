@@ -1,0 +1,288 @@
+#!/opt/core/venv/bin/python3
+
+import argparse
+import ipaddress
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+
+from tabulate import tabulate
+import grpc
+from core.api.grpc.client import CoreGrpcClient, InterfaceHelper
+from core.api.grpc.wrappers import Interface, Link, Node, NodeType, Position
+from core.scripts.cli import coreclient
+
+
+@dataclass
+class RJ45_Node:
+    id: int
+    name: str
+    gateway_id: int
+    gateway_name: str
+    gateway_ip4: str
+    gateway_ip4_mask: str
+
+
+@dataclass
+class Gateway_Node:
+    id: int
+    name: str
+    iface: int
+    ip4: str
+    ip4_mask: str
+
+
+def main():
+    session = find_session()
+    args = get_args(session.id, sys.argv[1:])
+    if args.command == "list":
+        list_status(session.id)
+        exit(0)
+    if args.command == "add":
+        add_rj45_node(session.id, args)
+    if args.command == "delete":
+        delete_rj45_node(session.id, args)
+
+
+def get_args(session_id: int, argv=None) -> argparse.Namespace:
+    ifaces = get_ifaces(session_id)
+    nodes = [x.id for x in get_unbridged_nodes(session_id)]
+    
+    iface_parser = argparse.ArgumentParser(add_help=False)
+    iface_parser.add_argument("-i", "--interface", choices=ifaces, help="Interface to add/delete RJ45 node", required=True)
+    
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    
+    add_parser = subparsers.add_parser("add", help="Add RJ45 node", parents=[iface_parser])
+    add_parser.add_argument("-n", "--node_id", choices=nodes, type=int, help="Gateway node to link with RJ45 node", metavar="NODE_ID")
+    
+    del_parser = subparsers.add_parser("delete", parents=[iface_parser], help="Delete RJ45 node")
+    list_parser = subparsers.add_parser("list", help="List interfaces and nodes")
+    return parser.parse_args(argv)
+
+
+@coreclient
+def add_rj45_node(core: CoreGrpcClient, session_id: int, args: argparse.Namespace):
+    rj45_node = Node(
+        name=args.interface,
+        type=NodeType.RJ45,
+        position=get_next_node_position(session_id),
+    )
+    rj45_node_id = core.add_node(session_id, rj45_node)
+    print(f"Node added with ID: {rj45_node_id}")
+
+    # Use info from Gateway Node based on gived ID to create link
+    gateway_node = next((x for x in gateway_nodes if x.id == args.node_id), None)
+    if gateway_node == None:
+        exit("Can't find gateway node with given ID")
+
+    # Check if iface already exists or create it
+    node1, ifaces, _ = core.get_node(session_id, args.node_id)
+    gateway_iface = next((x for x in ifaces if x.id == gateway_node.iface), None)
+    if gateway_iface is None:
+        iface_helper = InterfaceHelper(ip4_prefix=get_network_address(args.node_id))
+        gateway_iface = iface_helper.create_iface(args.node_id, gateway_node.iface)
+    gateway_iface.ip4 = f"{gateway_node.ip4}"
+    
+    rj45_iface = Interface(0)
+    link = Link(node1_id=gateway_node.id, node2_id=rj45_node_id, iface1=gateway_iface, iface2=rj45_iface)
+    result, iface1, iface2 = core.add_link(session_id, link)
+    if result:
+        print(f"{args.interface} linked to {gateway_node.name}")
+
+
+@coreclient
+def delete_rj45_node(core: CoreGrpcClient, session_id: int, args: argparse.Namespace):
+    rj45_nodes = get_rj45_nodes(session_id)
+    node = next((x for x in rj45_nodes if x.name == args.interface), None)
+    if node is None:
+        exit("Couldn't find interface in node list")
+    result = core.delete_node(session_id, node.id)
+    if result:
+        print("Deleted node")
+    
+    
+@coreclient
+def find_session(core: CoreGrpcClient):
+    sessions = core.get_sessions()
+    session = next((x for x in sessions if x.file == "/etc/greybox/map.xml"), None)
+    if session:    
+        session_id = session.id
+    else:
+        result, session_id = core.open_xml(Path("/etc/greybox/map.xml"), start=False)    
+    session = core.get_session(session_id)
+    if session:
+        return session
+    else:
+        exit("Unable to find or start session with /etc/greybox/map.xml")
+
+
+@coreclient
+def get_bridged_ifaces(core: CoreGrpcClient, session_id: int) -> list[str]:
+    return [x.name for x in get_rj45_nodes(session_id)]
+
+
+def get_network_address(node_id: int):
+    node = next((x for x in gateway_nodes if x.id == node_id), None)
+    network_address = ipaddress.IPv4Network(address=f"{node.ip4}/{node.ip4_mask}", strict=False)
+    return str(network_address)
+
+
+
+def get_next_node_position(session_id: int) -> Position:
+    """
+    Return Position for next rj45 node
+
+    """
+    n = len(get_rj45_nodes(session_id))
+    return Position(x=50*n,y=50)
+
+
+@coreclient
+def get_rj45_nodes(core: CoreGrpcClient, session_id: int) -> list[str]:
+    rj45_nodes = []
+    session = core.get_session(session_id)
+    nodes = [x for x in session.nodes.values() if x.type == NodeType.RJ45]
+    for node in nodes:
+        node, ifaces, links = core.get_node(session_id, node.id)
+        link = next((x for x in links if x.node1_id == node.id), None)
+        if link is None:
+            continue       
+        gateway, _, _ = core.get_node(session_id, link.node2_id)
+        rj45_nodes.append(
+            RJ45_Node(
+                id=node.id, 
+                name=node.name, 
+                gateway_id=link.node2_id, 
+                gateway_name=gateway.name, 
+                gateway_ip4=link.iface2.ip4,
+                gateway_ip4_mask=link.iface2.ip4_mask))
+    return rj45_nodes
+
+
+@coreclient
+def get_ifaces(core: CoreGrpcClient, session_id: int) -> list[str]:
+    return core.get_ifaces()
+
+
+@coreclient
+def get_unbridged_ifaces(core: CoreGrpcClient, session_id: int) -> list[str]:
+    rj45_ifaces = [x.name for x in get_rj45_nodes(session_id)]
+    return [x for x in core.get_ifaces() if x not in rj45_ifaces]
+
+
+@coreclient
+def get_unbridged_nodes(core: CoreGrpcClient, session_id: int) -> list[str]:
+    bridged_node_ids = [x.gateway_id for x in get_rj45_nodes(session_id)]
+    return [x for x in gateway_nodes if x.id not in bridged_node_ids]
+
+
+@coreclient
+def list_status(core: CoreGrpcClient, session_id: int) -> None:
+    print_header("Bridged Interfacse")
+    table = [["Interface", "Gateway Node ID", "Gateway Name", "Gateway IP"]]
+    rj45_nodes = get_rj45_nodes(session_id)
+    for node in rj45_nodes:
+        table.append([node.name, node.gateway_id, node.gateway_name, f"{node.gateway_ip4}/{node.gateway_ip4_mask}"])
+    print(tabulate(table, headers="firstrow", tablefmt="simple"))
+    
+    print_header("Unbridged Interfaces")
+    unbridged_ifaces = get_unbridged_ifaces(session_id)
+    for iface in unbridged_ifaces:
+        print(iface)
+
+    print_header("Available Gateway Nodes")
+    unbridged_nodes = get_unbridged_nodes(session_id)
+    table = [["Gateway Node ID", "Gateway Name", "Gateway IP"]]
+    for node in unbridged_nodes:
+        table.append([node.id, node.name, f"{node.ip4}/{node.ip4_mask}"])
+
+    print(tabulate(table, headers="firstrow", tablefmt="simple"))
+
+
+def print_header(title: str):
+    symbol = "-"
+    width = 80
+    print(f"\n{symbol*width}\n{title}\n{symbol*width}")
+
+
+@coreclient
+def get_next_node_id(core: CoreGrpcClient, session_id: int) -> int:
+    session = core.get_session(session_id)
+    return max(session.nodes.keys()) + 1
+
+
+# Most routers in greybox have a disabled interface labeled branch with a /24 network.
+# This tool uses them to bridge with physical interfaces and allow external access to greybox
+gateway_nodes = [
+    Gateway_Node(101, "bogota-rtr.americatel.com", 5, "190.7.109.1", 24),
+    Gateway_Node(102, "buenosaires-rtr.americatel.com", 5, "200.49.193.1", 24),
+    Gateway_Node(103, "fortaleza-rtr.americatel.com", 7, "200.19.188.1", 24),
+    Gateway_Node(104, "lima-rtr.americatel.com", 5, "190.81.10.1", 24),
+    Gateway_Node(105, "helsinki-rtr.btplc.com", 5, "81.22.162.1", 24),
+    Gateway_Node(106, "lisbon-rtr.btplc.com", 5, "77.54.154.1", 24),
+    Gateway_Node(107, "london-rtr.btplc.com", 7, "157.83.96.1", 24),
+    Gateway_Node(108, "marseille-rtr.btplc.com", 7, "78.232.138.1", 24),
+    Gateway_Node(109, "moscow-rtr.btplc.com", 6, "94.228.204.1", 24),
+    Gateway_Node(110, "kansascity-rtr.centurylink.com", 7, "107.150.55.1", 24),
+    Gateway_Node(111, "losangeles-rtr.centurylink.com", 7, "70.39.185.1", 24),
+    Gateway_Node(112, "miami-rtr.centurylink.com", 7, "72.252.9.1", 24),
+    Gateway_Node(113, "minneapolis-rtr.centurylink.com", 7, "161.225.196.1", 24),
+    Gateway_Node(114, "newyork-rtr.centurylink.com", 6, "67.221.255.1", 24),
+    Gateway_Node(115, "portland-rtr.centurylink.com", 5, "199.87.230.1", 24),
+    Gateway_Node(116, "alpha-rtr.disa.mil", 5, "156.0.1.1", 24),
+    Gateway_Node(117, "bravo-rtr.disa.mil", 5, "156.0.2.1", 24),
+    Gateway_Node(118, "charlie-rtr.disa.mil", 5, "156.0.3.1", 24),
+    Gateway_Node(119, "delta-rtr.disa.mil", 5, "156.0.4.1", 24),
+    Gateway_Node(120, "service-rtr.disa.mil", 5, "156.156.156.1", 24),
+    Gateway_Node(125, "kansascity-rtr.level3.com", 7, "192.187.100.1", 24),
+    Gateway_Node(126, "losangeles-rtr.level3.com", 6, "96.47.226.1", 24),
+    Gateway_Node(127, "miami-rtr.level3.com", 6, "69.60.121.1", 24),
+    Gateway_Node(128, "minneapolis-rtr.level3.com", 7, "170.135.241.1", 24),
+    Gateway_Node(129, "newyork-rtr.level3.com", 7, "104.131.66.1", 24),
+    Gateway_Node(130, "portland-rtr.level3.com", 5, "199.87.230.1", 24),
+    Gateway_Node(131, "beijing-rtr.pacnet.com", 7, "106.39.189.1", 24),
+    Gateway_Node(132, "hongkong-rtr.pacnet.com", 7, "119.81.161.1", 24),
+    Gateway_Node(133, "krasnojarsk-rtr.pacnet.com", 4, "109.226.199.1", 24),
+    Gateway_Node(134, "mumbai-rtr.pacnet.com", 6, "115.249.25.1", 24),
+    Gateway_Node(135, "seoul-rtr.pacnet.com", 5, "1.226.51.1", 24),
+    Gateway_Node(136, "tokyo-rtr.pacnet.com", 6, "202.246.252.1", 24),
+    Gateway_Node(137, "manila-rtr.singtel.com", 6, "121.54.54.1", 24),
+    Gateway_Node(138, "perth-rtr.singtel.com", 5, "165.118.1.1", 24),
+    Gateway_Node(139, "singapore-rtr.singtel.com", 6, "183.90.103.1", 24),
+    Gateway_Node(140, "sydney-rtr.singtel.com", 7, "49.0.8.1", 24),
+    Gateway_Node(141, "helsinki-rtr.sky.com", 5, "212.149.223.1", 24),
+    Gateway_Node(142, "lisbon-rtr.sky.com", 6, "2.82.178.1", 24),
+    Gateway_Node(143, "london-rtr.sky.com", 7, "131.228.29.1", 24),
+    Gateway_Node(144, "marseille-rtr.sky.com", 6, "195.220.8.1", 24),
+    Gateway_Node(145, "moscow-rtr.sky.com", 5, "109.63.253.1", 24),
+    Gateway_Node(146, "beijing-rtr.tatacommunications.com", 7, "112.20.190.1", 24),
+    Gateway_Node(147, "hongkong-rtr.tatacommunications.com", 7, "153.92.43.1", 24),
+    Gateway_Node(148, "krasnojarsk-rtr.tatacommunications.com", 3, "178.169.97.1", 24),
+    Gateway_Node(149, "mumbai-rtr.tatacommunications.com", 5, "206.183.111.1", 24),
+    Gateway_Node(150, "seoul-rtr.tatacommunications.com", 5, "14.63.19.1", 24),
+    Gateway_Node(151, "tokyo-rtr.tatacommunications.com", 7, "114.160.71.1", 24),
+    Gateway_Node(152, "abidjan-rtr.tedata.net", 6, "213.136.113.1", 24),
+    Gateway_Node(153, "cairo-rtr.tedata.net", 7, "163.121.188.1", 24),
+    Gateway_Node(154, "capetown-rtr.tedata.net", 5, "105.228.93.1", 24),
+    Gateway_Node(155, "djibouti-rtr.tedata.net", 6, "41.189.254.1", 24),
+    Gateway_Node(156, "dubai-rtr.tedata.net", 5, "94.201.0.1", 24),
+    Gateway_Node(157, "manila-rtr.telstra.com.au", 5, "125.60.156.1", 24),
+    Gateway_Node(158, "perth-rtr.telstra.com.au", 5, "27.54.92.1", 24),
+    Gateway_Node(159, "singapore-rtr.telstra.com.au", 7, "220.255.1.1", 24),
+    Gateway_Node(160, "sydney-rtr.telstra.com.au", 6, "140.168.135.1", 24),
+    Gateway_Node(161, "bogota-rtr.terra.com", 5, "167.7.110.1", 24),
+    Gateway_Node(162, "buenosaires-rtr.terra.com", 5, "186.129.255.1", 24),
+    Gateway_Node(163, "fortaleza-rtr.terra.com", 7, "189.90.160.1", 24),
+    Gateway_Node(164, "lima-rtr.terra.com", 6, "200.48.103.1", 24),
+    Gateway_Node(165, "abidjan-rtr.vodacom.co.za", 5, "41.66.28.1", 24),
+    Gateway_Node(166, "cairo-rtr.vodacom.co.za", 7, "41.38.121.1", 24),
+    Gateway_Node(167, "capetown-rtr.vodacom.co.za", 6, "164.151.4.1", 24),
+    Gateway_Node(168, "djibouti-rtr.vodacom.co.za", 7, "193.21.143.1", 24),
+    Gateway_Node(169, "dubai-rtr.vodacom.co.za", 4, "195.229.241.1", 24),
+]
+
+if __name__=="__main__":
+    main()
