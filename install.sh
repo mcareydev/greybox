@@ -26,3 +26,6 @@ for i in clipart etc maps; do
 done
 
 /usr/bin/install -m 0755 -t $BULDROOT/$BINDIR bin/*
+
+# iface-linker dependency
+/opt/core/venv/bin/python3 -m pip install tabulate
