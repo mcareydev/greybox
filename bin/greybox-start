@@ -3,14 +3,16 @@
 from pathlib import Path
 
 import grpc
-from core.api.grpc import client
+from core.api.grpc.client import CoreGrpcClient
+from core.api.grpc.wrappers import SessionState
+from core.scripts.cli import coreclient
 
-def main() -> int:
 
-    core = client.CoreGrpcClient()
+session_id_path = Path("/run/greybox.sid")
+map_path = Path("/etc/greybox/map.xml")
 
-    # Check for existing session id  
-    session_id_path = Path("/run/greybox.sid")
+@coreclient
+def get_session(core: CoreGrpcClient):
     if session_id_path.exists():
         try:
             existing_id = int(session_id_path.read_text()) 
@@ -21,21 +23,27 @@ def main() -> int:
         # If existing ID found, check if it's still valid
         if existing_id:
             try:
-                with core.context_connect():
-                    session_valid = core.check_session(existing_id)
+                return core.get_session(existing_id)
             except grpc.RpcError as e:
-                exit(f"grpc error: {e.details()}")
+                print(f"grpc error: {e.details()}")
+                session_id_path.unlink()
+    return None
 
-            if session_valid:
-                # Print session ID and exit to avoid replacing valid session
-                # Exit with 0 to prevent restart loop
-                print(f"Service-started session already exists with ID {existing_id}")
+
+@coreclient
+def main(core: CoreGrpcClient) -> int:
+    if session:= get_session():
+        if session.state == SessionState.RUNTIME:
+            print(f"Session already running with id {session.id}")
+            exit(0)
+        else:
+            result = core.start_session(session.id)
+            if result:
+                print(f"Session with ID {session.id} found and started.")
                 exit(0)
-
-    # Open map xml file and start new session
+    
     try:
-        with core.context_connect():
-            result, session_id = core.open_xml(file_path=Path("/etc/greybox/map.xml"), start=True)
+        result, session_id = core.open_xml(map_path, start=True)
     except grpc.RpcError as e:
         exit(f"grpc error: {e.details()}")
 
