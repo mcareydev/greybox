@@ -39,10 +39,15 @@ class Gateway_Node:
 
 @coreclient
 def main(core: CoreGrpcClient):
+    session_created = False
     session = get_session()
-
-    if not session:
-        session = core.open_xml(map_path, start=False)
+    if session:
+        session_id = session.id
+    else:
+        session_created = True
+        result, session_id = core.open_xml(map_path, start=False)
+    if not session_id:
+        exit("Unable to open session to edit map, try using core-gui")
     args = get_args(session.id, sys.argv[1:])
     if args.command == "list":
         list_status(session.id)
@@ -53,6 +58,8 @@ def main(core: CoreGrpcClient):
         delete_rj45_node(session.id, args)
     
     core.save_xml(session.id, map_path)
+    if session_created:
+        core.delete_session(session_id)
 
 
 def get_args(session_id: int, argv=None) -> argparse.Namespace:
