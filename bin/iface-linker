@@ -48,16 +48,16 @@ def main(core: CoreGrpcClient):
         result, session_id = core.open_xml(map_path, start=False)
     if not session_id:
         exit("Unable to open session to edit map, try using core-gui")
-    args = get_args(session.id, sys.argv[1:])
+    args = get_args(session_id, sys.argv[1:])
     if args.command == "list":
-        list_status(session.id)
+        list_status(session_id)
         exit(0)
     if args.command == "add":
-        add_rj45_node(session.id, args)
+        add_rj45_node(session_id, args)
     if args.command == "delete":
-        delete_rj45_node(session.id, args)
+        delete_rj45_node(session_id, args)
     
-    core.save_xml(session.id, map_path)
+    core.save_xml(session_id, map_path)
     if session_created:
         core.delete_session(session_id)
 
