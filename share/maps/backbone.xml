@@ -7190,7 +7190,7 @@ start() {
     /usr/sbin/ip addr add $i scope global dev lo
   done
   [ -s /var/lib/topgen/etc/named.conf ] && \
-    /usr/sbin/named -u named -c /var/lib/topgen/etc/named.conf
+    /usr/sbin/named -u bind -c /var/lib/topgen/etc/named.conf
   [ -s /var/lib/topgen/etc/nginx.conf ] && \
     /usr/sbin/nginx
   [ -s /var/lib/topgen/etc/postfix/main.cf ] && \
